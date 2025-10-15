@@ -3,12 +3,13 @@
 const fs = require("fs");
 const path = require("path");
 const TelegramBot = require("node-telegram-bot-api");
+const express = require("express");
 
-// Configuration
+// Config
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) {
   console.error("Missing TELEGRAM_BOT_TOKEN environment variable.");
-  console.error("In PowerShell, set it with: $env:TELEGRAM_BOT_TOKEN=\"<your_token>\"");
+  console.error('In PowerShell, set it with: $env:TELEGRAM_BOT_TOKEN="<your_token>"');
   process.exit(1);
 }
 
@@ -20,8 +21,8 @@ const LOCK_PATH = path.join(DATA_DIR, "credentials.lock");
 // Bot init
 const bot = new TelegramBot(TOKEN, { polling: true });
 
-// Simple in-memory state: who we are waiting an email from
-const awaitingEmail = new Set(); // stores userId numbers
+// In-memory state
+const awaitingEmail = new Set();
 
 // Helpers
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
@@ -45,7 +46,6 @@ async function writeJson(filePath, data) {
   await fs.promises.rename(tmp, filePath);
 }
 
-// File lock to avoid double-assignments in concurrent requests
 async function withFileLock(fn) {
   for (let i = 0; i < 50; i++) {
     try {
@@ -87,9 +87,7 @@ function mainMenuKeyboard() {
 function myIdOnlyKeyboard() {
   return {
     reply_markup: {
-      inline_keyboard: [
-        [{ text: "My ID", callback_data: "myid" }],
-      ],
+      inline_keyboard: [[{ text: "My ID", callback_data: "myid" }]],
     },
   };
 }
@@ -106,17 +104,13 @@ async function assignUniqueCredential(userId) {
       return { already: true, assignment: users[userId] };
     }
 
-    // Load credential map: { username: password | { password, assigned, assignedTo, assignedAt } }
     const creds = await readJson(CREDENTIALS_PATH);
-
-    // Build list of available usernames
     const available = [];
+
     for (const [uname, value] of Object.entries(creds)) {
       if (typeof value === "string") {
-        // Unassigned (legacy format)
         available.push({ username: uname, password: value });
       } else if (value && typeof value === "object" && !value.assigned) {
-        // Object but not yet assigned
         available.push({ username: uname, password: value.password });
       }
     }
@@ -125,10 +119,8 @@ async function assignUniqueCredential(userId) {
       return { noneLeft: true };
     }
 
-    // Pick random available credential
     const pick = available[Math.floor(Math.random() * available.length)];
 
-    // Mark assigned in credentials.json
     creds[pick.username] = {
       password: pick.password,
       assigned: true,
@@ -136,7 +128,6 @@ async function assignUniqueCredential(userId) {
       assignedAt: new Date().toISOString(),
     };
 
-    // Persist users.json
     users[userId] = {
       username: pick.username,
       password: pick.password,
@@ -177,7 +168,7 @@ bot.onText(/\/start/, async (msg) => {
   }
 
   const welcome = [
-    "Welcome to Indepay Bot!",
+    "Welcome to NorexPay Bot!",
     "- Press Start to claim your unique account.",
     "- Press My ID to view your assigned credentials.",
   ].join("\n");
@@ -188,7 +179,7 @@ bot.onText(/\/myid/, async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   const assignment = await getUserAssignment(userId);
-if (!assignment) {
+  if (!assignment) {
     await bot.sendMessage(chatId, "You don’t have an account yet. Press Start to claim one.", mainMenuKeyboard());
     return;
   }
@@ -200,8 +191,7 @@ bot.on("callback_query", async (query) => {
   const chatId = query.message.chat.id;
   const userId = query.from.id;
 
-if (data === "start") {
-    // If already assigned, show and guide
+  if (data === "start") {
     const existing = await getUserAssignment(userId);
     if (existing) {
       await bot.sendMessage(chatId, "You’ve already claimed your account. Press My ID to view your credentials.", myIdOnlyKeyboard());
@@ -215,7 +205,7 @@ if (data === "start") {
 
   if (data === "myid") {
     const assignment = await getUserAssignment(userId);
-if (!assignment) {
+    if (!assignment) {
       await bot.sendMessage(chatId, "You don’t have an account yet. Press Start to claim one.", mainMenuKeyboard());
     } else {
       await bot.sendMessage(chatId, formatAssignmentMessage(assignment), myIdOnlyKeyboard());
@@ -225,15 +215,12 @@ if (!assignment) {
 });
 
 bot.on("message", async (msg) => {
-  // Skip messages that are commands
   if (msg.text && msg.text.startsWith("/")) return;
 
   const chatId = msg.chat.id;
   const userId = msg.from.id;
 
-  if (!awaitingEmail.has(userId)) {
-    return; // Not expecting an email from this user
-  }
+  if (!awaitingEmail.has(userId)) return;
 
   const email = (msg.text || "").trim();
   if (!isValidEmail(email)) {
@@ -241,7 +228,6 @@ bot.on("message", async (msg) => {
     return;
   }
 
-  // Good email -> assign credential
   awaitingEmail.delete(userId);
 
   try {
@@ -272,4 +258,14 @@ bot.on("message", async (msg) => {
   }
 });
 
-console.log("Indepay bot is running. Use /start to begin.");
+console.log("NorexPay bot is running. Use /start to begin.");
+
+// Render ws
+const app = express();
+app.get("/", (req, res) => {
+  res.send("Bot is running");
+});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Web service running on port ${PORT}`);
+});
