@@ -36,8 +36,16 @@ async function ensureFile(filePath, initialJson) {
 }
 
 async function readJson(filePath) {
-  const raw = await fs.promises.readFile(filePath, "utf8");
-  return JSON.parse(raw);
+  try {
+    const raw = await fs.promises.readFile(filePath, "utf8");
+    const trimmed = raw.trim();
+    if (!trimmed) return {}; // guard for empty file
+    return JSON.parse(trimmed);
+  } catch (err) {
+    if (err.code === "ENOENT") return {}; // guard for missing file
+    console.error(`Failed to read or parse ${filePath}`, err);
+    return {};
+  }
 }
 
 async function writeJson(filePath, data) {
@@ -269,3 +277,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Web service running on port ${PORT}`);
 });
+
