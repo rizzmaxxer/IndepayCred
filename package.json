@@ -1,0 +1,15 @@
+{
+  "name": "nxpaycreds",
+  "version": "1.0.0",
+  "description": "Telegram bot to assign unique credentials from credentials.json",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
