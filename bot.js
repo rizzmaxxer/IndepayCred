@@ -18,7 +18,7 @@ const CREDENTIALS_PATH = path.join(DATA_DIR, "credentials.json");
 const USERS_PATH = path.join(DATA_DIR, "users.json");
 const LOCK_PATH = path.join(DATA_DIR, "credentials.lock");
 
-// Bot init
+// init
 const bot = new TelegramBot(TOKEN, { polling: true });
 
 // In-memory state
@@ -39,10 +39,10 @@ async function readJson(filePath) {
   try {
     const raw = await fs.promises.readFile(filePath, "utf8");
     const trimmed = raw.trim();
-    if (!trimmed) return {}; // guard for empty file
+    if (!trimmed) return {};
     return JSON.parse(trimmed);
   } catch (err) {
-    if (err.code === "ENOENT") return {}; // guard for missing file
+    if (err.code === "ENOENT") return {};
     console.error(`Failed to read or parse ${filePath}`, err);
     return {};
   }
@@ -171,13 +171,13 @@ bot.onText(/\/start/, async (msg) => {
 
   const existing = await getUserAssignment(userId);
   if (existing) {
-    await bot.sendMessage(chatId, "You’ve already claimed your account. Press My ID to view your credentials.", myIdOnlyKeyboard());
+    await bot.sendMessage(chatId, "You’ve already claimed your id. Press My ID to view your credentials.", myIdOnlyKeyboard());
     return;
   }
 
   const welcome = [
-    "Welcome to NorexPay Bot!",
-    "- Press Start to claim your unique account.",
+    "Welcome to Indepay Bot!",
+    "- Press Start to get your id.",
     "- Press My ID to view your assigned credentials.",
   ].join("\n");
   await bot.sendMessage(chatId, welcome, mainMenuKeyboard());
@@ -188,7 +188,7 @@ bot.onText(/\/myid/, async (msg) => {
   const userId = msg.from.id;
   const assignment = await getUserAssignment(userId);
   if (!assignment) {
-    await bot.sendMessage(chatId, "You don’t have an account yet. Press Start to claim one.", mainMenuKeyboard());
+    await bot.sendMessage(chatId, "You don’t have an id yet. Press Start to claim one.", mainMenuKeyboard());
     return;
   }
   await bot.sendMessage(chatId, formatAssignmentMessage(assignment), myIdOnlyKeyboard());
@@ -202,7 +202,7 @@ bot.on("callback_query", async (query) => {
   if (data === "start") {
     const existing = await getUserAssignment(userId);
     if (existing) {
-      await bot.sendMessage(chatId, "You’ve already claimed your account. Press My ID to view your credentials.", myIdOnlyKeyboard());
+      await bot.sendMessage(chatId, "You’ve already claimed your id. Press My ID to view your credentials.", myIdOnlyKeyboard());
       return bot.answerCallbackQuery(query.id);
     }
 
@@ -214,7 +214,7 @@ bot.on("callback_query", async (query) => {
   if (data === "myid") {
     const assignment = await getUserAssignment(userId);
     if (!assignment) {
-      await bot.sendMessage(chatId, "You don’t have an account yet. Press Start to claim one.", mainMenuKeyboard());
+      await bot.sendMessage(chatId, "You don’t have an id yet. Press Start to claim one.", mainMenuKeyboard());
     } else {
       await bot.sendMessage(chatId, formatAssignmentMessage(assignment), myIdOnlyKeyboard());
     }
@@ -243,7 +243,7 @@ bot.on("message", async (msg) => {
 
     if (result.already) {
       await bot.sendMessage(chatId, [
-        "You’ve already claimed your account.",
+        "You’ve already claimed your id.",
         "",
         formatAssignmentMessage(result.assignment),
       ].join("\n"), myIdOnlyKeyboard());
@@ -251,22 +251,22 @@ bot.on("message", async (msg) => {
     }
 
     if (result.noneLeft) {
-      await bot.sendMessage(chatId, "Sorry, all accounts have been assigned.", mainMenuKeyboard());
+      await bot.sendMessage(chatId, "Sorry, all id's have been assigned.", mainMenuKeyboard());
       return;
     }
 
     await bot.sendMessage(chatId, [
-      "Success! Your account has been assigned.",
+      "Success! Your id has been assigned.",
       "",
       formatAssignmentMessage(result.assignment),
     ].join("\n"), myIdOnlyKeyboard());
   } catch (err) {
     console.error("Assignment error:", err);
-    await bot.sendMessage(chatId, "An error occurred while assigning your account. Please try again.", mainMenuKeyboard());
+    await bot.sendMessage(chatId, "An error occurred while assigning your id. Please try again.", mainMenuKeyboard());
   }
 });
 
-console.log("NorexPay bot is running. Use /start to begin.");
+console.log("Indepay bot is running. Use /start to begin.");
 
 // Render ws
 const app = express();
@@ -277,4 +277,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Web service running on port ${PORT}`);
 });
+
 
