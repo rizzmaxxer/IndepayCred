@@ -1,5 +1,5 @@
 {
-  "name": "nxpaycreds",
+  "name": "IndepayCred",
   "version": "1.0.0",
   "description": "Telegram bot to assign unique credentials from credentials.json",
   "main": "bot.js",
@@ -10,6 +10,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "express": "^4.21.2",
     "node-telegram-bot-api": "^0.66.0"
   }
 }
