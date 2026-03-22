@@ -4,31 +4,19 @@ const fs = require("fs");
 const path = require("path");
 const TelegramBot = require("node-telegram-bot-api");
 const express = require("express");
-const sqlite3 = require("sqlite3").verbose();
-const { promisify } = require("util");
 
 // Config
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) {
   console.error("Missing TELEGRAM_BOT_TOKEN environment variable.");
+  console.error('In PowerShell, set it with: $env:TELEGRAM_BOT_TOKEN="<your_token>"');
   process.exit(1);
 }
 
-// Use Render's free persistent disk
-const DATA_DIR = process.env.RENDER_DISK_PATH || path.join(__dirname, "data");
-const DB_PATH = path.join(DATA_DIR, "bot_data.db");
-
-// Ensure data directory exists
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  console.log(`Created data directory at ${DATA_DIR}`);
-}
-
-// Initialize SQLite database
-const db = new sqlite3.Database(DB_PATH);
-const dbGet = promisify(db.get.bind(db));
-const dbRun = promisify(db.run.bind(db));
-const dbAll = promisify(db.all.bind(db));
+const DATA_DIR = __dirname;
+const CREDENTIALS_PATH = path.join(DATA_DIR, "credentials.json");
+const USERS_PATH = path.join(DATA_DIR, "users.json");
+const LOCK_PATH = path.join(DATA_DIR, "credentials.lock");
 
 // init
 const bot = new TelegramBot(TOKEN, { polling: true });
@@ -36,108 +24,56 @@ const bot = new TelegramBot(TOKEN, { polling: true });
 // In-memory state
 const awaitingEmail = new Set();
 
-async function initDatabase() {
-  // Create users table
-  await dbRun(`
-    CREATE TABLE IF NOT EXISTS users (
-      user_id INTEGER PRIMARY KEY,
-      username TEXT NOT NULL,
-      password TEXT NOT NULL,
-      email TEXT UNIQUE NOT NULL,
-      claimed_at TEXT NOT NULL
-    )
-  `);
+// Helpers
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
-  // Create credentials table
-  await dbRun(`
-    CREATE TABLE IF NOT EXISTS credentials (
-      username TEXT PRIMARY KEY,
-      password TEXT NOT NULL,
-      assigned INTEGER DEFAULT 0,
-      assigned_to INTEGER,
-      assigned_at TEXT
-    )
-  `);
+async function ensureFile(filePath, initialJson) {
+  try {
+    await fs.promises.access(filePath, fs.constants.F_OK);
+  } catch (_) {
+    await fs.promises.writeFile(filePath, JSON.stringify(initialJson, null, 2), "utf8");
+  }
+}
 
-  // Check if credentials table is empty, if so, populate it
-  const count = await dbGet("SELECT COUNT(*) as count FROM credentials");
-  if (count.count === 0) {
-    console.log("Populating credentials table with sample data...");
-    const sampleCredentials = [
-      ["user1@example.com", "pass123"],
-      ["user2@example.com", "pass456"],
-      ["user3@example.com", "pass789"],
-      ["user4@example.com", "passabc"],
-      ["user5@example.com", "passdef"],
-    ];
+async function readJson(filePath) {
+  try {
+    const raw = await fs.promises.readFile(filePath, "utf8");
+    const trimmed = raw.trim();
+    if (!trimmed) return {};
+    return JSON.parse(trimmed);
+  } catch (err) {
+    if (err.code === "ENOENT") return {};
+    console.error(`Failed to read or parse ${filePath}`, err);
+    return {};
+  }
+}
 
-    for (const [username, password] of sampleCredentials) {
-      await dbRun(
-        "INSERT INTO credentials (username, password, assigned) VALUES (?, ?, 0)",
-        [username, password]
-      );
+async function writeJson(filePath, data) {
+  const tmp = `${filePath}.tmp`;
+  await fs.promises.writeFile(tmp, JSON.stringify(data, null, 2), "utf8");
+  await fs.promises.rename(tmp, filePath);
+}
+
+async function withFileLock(fn) {
+  for (let i = 0; i < 50; i++) {
+    try {
+      const handle = await fs.promises.open(LOCK_PATH, "wx");
+      try {
+        const result = await fn();
+        return result;
+      } finally {
+        await handle.close();
+        await fs.promises.unlink(LOCK_PATH).catch(() => {});
+      }
+    } catch (err) {
+      if (err && err.code === "EEXIST") {
+        await sleep(200);
+        continue;
+      }
+      throw err;
     }
-    console.log("Sample credentials added");
   }
-}
-
-async function getUserAssignment(userId) {
-  const user = await dbGet("SELECT * FROM users WHERE user_id = ?", [userId]);
-  return user || null;
-}
-
-async function getUserByEmail(email) {
-  const user = await dbGet("SELECT * FROM users WHERE email = ?", [email]);
-  return user || null;
-}
-
-async function assignUniqueCredential(userId, email) {
-  // First check if user already has an assignment
-  const existingUser = await getUserAssignment(userId);
-  if (existingUser) {
-    return { already: true, assignment: existingUser };
-  }
-
-  // Check if email is already used
-  const existingEmail = await getUserByEmail(email);
-  if (existingEmail) {
-    return { emailUsed: true };
-  }
-
-  // Find available credential
-  const availableCred = await dbGet(
-    "SELECT * FROM credentials WHERE assigned = 0 LIMIT 1"
-  );
-
-  if (!availableCred) {
-    return { noneLeft: true };
-  }
-
-  const now = new Date().toISOString();
-
-  // Update credentials table
-  await dbRun(
-    `UPDATE credentials 
-     SET assigned = 1, assigned_to = ?, assigned_at = ?
-     WHERE username = ?`,
-    [userId, now, availableCred.username]
-  );
-
-  // Add user record
-  await dbRun(
-    "INSERT INTO users (user_id, username, password, email, claimed_at) VALUES (?, ?, ?, ?, ?)",
-    [userId, availableCred.username, availableCred.password, email, now]
-  );
-
-  const assignment = {
-    user_id: userId,
-    username: availableCred.username,
-    password: availableCred.password,
-    email: email,
-    claimed_at: now
-  };
-
-  return { already: false, assignment };
+  throw new Error("Could not acquire assignment lock. Please try again.");
 }
 
 function isValidEmail(email) {
@@ -164,12 +100,65 @@ function myIdOnlyKeyboard() {
   };
 }
 
+async function getOrCreateUsers() {
+  await ensureFile(USERS_PATH, {});
+  return readJson(USERS_PATH);
+}
+
+async function assignUniqueCredential(userId) {
+  return withFileLock(async () => {
+    const users = await getOrCreateUsers();
+    if (users[userId]) {
+      return { already: true, assignment: users[userId] };
+    }
+
+    const creds = await readJson(CREDENTIALS_PATH);
+    const available = [];
+
+    for (const [uname, value] of Object.entries(creds)) {
+      if (typeof value === "string") {
+        available.push({ username: uname, password: value });
+      } else if (value && typeof value === "object" && !value.assigned) {
+        available.push({ username: uname, password: value.password });
+      }
+    }
+
+    if (available.length === 0) {
+      return { noneLeft: true };
+    }
+
+    const pick = available[Math.floor(Math.random() * available.length)];
+
+    creds[pick.username] = {
+      password: pick.password,
+      assigned: true,
+      assignedTo: String(userId),
+      assignedAt: new Date().toISOString(),
+    };
+
+    users[userId] = {
+      username: pick.username,
+      password: pick.password,
+      claimedAt: new Date().toISOString(),
+    };
+
+    await writeJson(CREDENTIALS_PATH, creds);
+    await writeJson(USERS_PATH, users);
+
+    return { already: false, assignment: users[userId] };
+  });
+}
+
+async function getUserAssignment(userId) {
+  const users = await getOrCreateUsers();
+  return users[userId] || null;
+}
+
 function formatAssignmentMessage(assignment) {
   return [
     "Here are your credentials:",
     `Username: ${assignment.username}`,
     `Password: ${assignment.password}`,
-    `Email: ${assignment.email}`,
     "",
     "Keep them safe. You can always press My ID to view them again.",
   ].join("\n");
@@ -182,7 +171,7 @@ bot.onText(/\/start/, async (msg) => {
 
   const existing = await getUserAssignment(userId);
   if (existing) {
-    await bot.sendMessage(chatId, "You've already claimed your id. Press My ID to view your credentials.", myIdOnlyKeyboard());
+    await bot.sendMessage(chatId, "You’ve already claimed your id. Press My ID to view your credentials.", myIdOnlyKeyboard());
     return;
   }
 
@@ -199,7 +188,7 @@ bot.onText(/\/myid/, async (msg) => {
   const userId = msg.from.id;
   const assignment = await getUserAssignment(userId);
   if (!assignment) {
-    await bot.sendMessage(chatId, "You don't have an id yet. Press Start to claim one.", mainMenuKeyboard());
+    await bot.sendMessage(chatId, "You don’t have an id yet. Press Start to claim one.", mainMenuKeyboard());
     return;
   }
   await bot.sendMessage(chatId, formatAssignmentMessage(assignment), myIdOnlyKeyboard());
@@ -213,7 +202,7 @@ bot.on("callback_query", async (query) => {
   if (data === "start") {
     const existing = await getUserAssignment(userId);
     if (existing) {
-      await bot.sendMessage(chatId, "You've already claimed your id. Press My ID to view your credentials.", myIdOnlyKeyboard());
+      await bot.sendMessage(chatId, "You’ve already claimed your id. Press My ID to view your credentials.", myIdOnlyKeyboard());
       return bot.answerCallbackQuery(query.id);
     }
 
@@ -225,7 +214,7 @@ bot.on("callback_query", async (query) => {
   if (data === "myid") {
     const assignment = await getUserAssignment(userId);
     if (!assignment) {
-      await bot.sendMessage(chatId, "You don't have an id yet. Press Start to claim one.", mainMenuKeyboard());
+      await bot.sendMessage(chatId, "You don’t have an id yet. Press Start to claim one.", mainMenuKeyboard());
     } else {
       await bot.sendMessage(chatId, formatAssignmentMessage(assignment), myIdOnlyKeyboard());
     }
@@ -250,19 +239,14 @@ bot.on("message", async (msg) => {
   awaitingEmail.delete(userId);
 
   try {
-    const result = await assignUniqueCredential(userId, email);
+    const result = await assignUniqueCredential(userId);
 
     if (result.already) {
       await bot.sendMessage(chatId, [
-        "You've already claimed your id.",
+        "You’ve already claimed your id.",
         "",
         formatAssignmentMessage(result.assignment),
       ].join("\n"), myIdOnlyKeyboard());
-      return;
-    }
-
-    if (result.emailUsed) {
-      await bot.sendMessage(chatId, "This email has already been used to claim credentials. Please use a different email address.", mainMenuKeyboard());
       return;
     }
 
@@ -282,16 +266,9 @@ bot.on("message", async (msg) => {
   }
 });
 
-// Initialize database and start the bot
-initDatabase().then(() => {
-  console.log(`Database initialized at ${DB_PATH}`);
-  console.log("Indepay bot is running. Use /start to begin.");
-}).catch(err => {
-  console.error("Failed to initialize database:", err);
-  process.exit(1);
-});
+console.log("Indepay bot is running. Use /start to begin.");
 
-// Web service for Render
+// Render ws
 const app = express();
 app.get("/", (req, res) => {
   res.send("Bot is running");
@@ -299,17 +276,4 @@ app.get("/", (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Web service running on port ${PORT}`);
-});
-
-// Graceful shutdown
-process.on('SIGINT', async () => {
-  console.log('Closing database connection...');
-  await db.close();
-  process.exit(0);
-});
-
-process.on('SIGTERM', async () => {
-  console.log('Closing database connection...');
-  await db.close();
-  process.exit(0);
 });
