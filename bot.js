@@ -156,11 +156,11 @@ async function getUserAssignment(userId) {
 
 function formatAssignmentMessage(assignment) {
   return [
-    "Here are your credentials:",
+    "Below are your credentials; Contact @indepaysupport if assistance is needed",
     `Username: ${assignment.username}`,
     `Password: ${assignment.password}`,
     "",
-    "Keep them safe. You can always press My ID to view them again.",
+    "You can now login on the panel and complete the activation to start working. Press My ID to view your ID again.",
   ].join("\n");
 }
 
