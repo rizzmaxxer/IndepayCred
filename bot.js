@@ -4,7 +4,8 @@ const fs = require("fs");
 const path = require("path");
 const TelegramBot = require("node-telegram-bot-api");
 const express = require("express");
-const { Pool } = require("pg");
+const sqlite3 = require("sqlite3").verbose();
+const { promisify } = require("util");
 
 // Config
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -13,11 +14,21 @@ if (!TOKEN) {
   process.exit(1);
 }
 
-// PostgreSQL connection
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-});
+// Use Render's free persistent disk
+const DATA_DIR = process.env.RENDER_DISK_PATH || path.join(__dirname, "data");
+const DB_PATH = path.join(DATA_DIR, "bot_data.db");
+
+// Ensure data directory exists
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  console.log(`Created data directory at ${DATA_DIR}`);
+}
+
+// Initialize SQLite database
+const db = new sqlite3.Database(DB_PATH);
+const dbGet = promisify(db.get.bind(db));
+const dbRun = promisify(db.run.bind(db));
+const dbAll = promisify(db.all.bind(db));
 
 // init
 const bot = new TelegramBot(TOKEN, { polling: true });
@@ -25,153 +36,108 @@ const bot = new TelegramBot(TOKEN, { polling: true });
 // In-memory state
 const awaitingEmail = new Set();
 
-// Helper functions
-const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
-
 async function initDatabase() {
-  const client = await pool.connect();
-  try {
-    // Create users table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        user_id BIGINT PRIMARY KEY,
-        username VARCHAR(255) NOT NULL,
-        password VARCHAR(255) NOT NULL,
-        email VARCHAR(255) UNIQUE NOT NULL,
-        claimed_at TIMESTAMP NOT NULL
-      )
-    `);
+  // Create users table
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS users (
+      user_id INTEGER PRIMARY KEY,
+      username TEXT NOT NULL,
+      password TEXT NOT NULL,
+      email TEXT UNIQUE NOT NULL,
+      claimed_at TEXT NOT NULL
+    )
+  `);
 
-    // Create credentials table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS credentials (
-        username VARCHAR(255) PRIMARY KEY,
-        password VARCHAR(255) NOT NULL,
-        assigned BOOLEAN DEFAULT FALSE,
-        assigned_to BIGINT,
-        assigned_at TIMESTAMP
-      )
-    `);
+  // Create credentials table
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS credentials (
+      username TEXT PRIMARY KEY,
+      password TEXT NOT NULL,
+      assigned INTEGER DEFAULT 0,
+      assigned_to INTEGER,
+      assigned_at TEXT
+    )
+  `);
 
-    // Check if credentials table is empty, if so, populate it
-    const result = await client.query("SELECT COUNT(*) FROM credentials");
-    if (parseInt(result.rows[0].count) === 0) {
-      console.log("Populating credentials table with sample data...");
-      const sampleCredentials = [
-        ["user1@example.com", "pass123"],
-        ["user2@example.com", "pass456"],
-        ["user3@example.com", "pass789"],
-        ["user4@example.com", "passabc"],
-        ["user5@example.com", "passdef"],
-      ];
+  // Check if credentials table is empty, if so, populate it
+  const count = await dbGet("SELECT COUNT(*) as count FROM credentials");
+  if (count.count === 0) {
+    console.log("Populating credentials table with sample data...");
+    const sampleCredentials = [
+      ["user1@example.com", "pass123"],
+      ["user2@example.com", "pass456"],
+      ["user3@example.com", "pass789"],
+      ["user4@example.com", "passabc"],
+      ["user5@example.com", "passdef"],
+    ];
 
-      for (const [username, password] of sampleCredentials) {
-        await client.query(
-          "INSERT INTO credentials (username, password, assigned) VALUES ($1, $2, $3)",
-          [username, password, false]
-        );
-      }
+    for (const [username, password] of sampleCredentials) {
+      await dbRun(
+        "INSERT INTO credentials (username, password, assigned) VALUES (?, ?, 0)",
+        [username, password]
+      );
     }
-  } finally {
-    client.release();
+    console.log("Sample credentials added");
   }
 }
 
 async function getUserAssignment(userId) {
-  const client = await pool.connect();
-  try {
-    const result = await client.query(
-      "SELECT * FROM users WHERE user_id = $1",
-      [userId]
-    );
-    return result.rows[0] || null;
-  } finally {
-    client.release();
-  }
+  const user = await dbGet("SELECT * FROM users WHERE user_id = ?", [userId]);
+  return user || null;
 }
 
 async function getUserByEmail(email) {
-  const client = await pool.connect();
-  try {
-    const result = await client.query(
-      "SELECT * FROM users WHERE email = $1",
-      [email]
-    );
-    return result.rows[0] || null;
-  } finally {
-    client.release();
-  }
+  const user = await dbGet("SELECT * FROM users WHERE email = ?", [email]);
+  return user || null;
 }
 
 async function assignUniqueCredential(userId, email) {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
-    // First check if user already has an assignment
-    const existingUser = await client.query(
-      "SELECT * FROM users WHERE user_id = $1",
-      [userId]
-    );
-    if (existingUser.rows.length > 0) {
-      await client.query("COMMIT");
-      return { already: true, assignment: existingUser.rows[0] };
-    }
-
-    // Check if email is already used
-    const existingEmail = await client.query(
-      "SELECT * FROM users WHERE email = $1",
-      [email]
-    );
-    if (existingEmail.rows.length > 0) {
-      await client.query("COMMIT");
-      return { emailUsed: true };
-    }
-
-    // Find available credential
-    const availableCred = await client.query(
-      "SELECT * FROM credentials WHERE assigned = false LIMIT 1 FOR UPDATE"
-    );
-
-    if (availableCred.rows.length === 0) {
-      await client.query("COMMIT");
-      return { noneLeft: true };
-    }
-
-    const cred = availableCred.rows[0];
-    const now = new Date().toISOString();
-
-    // Update credentials table
-    await client.query(
-      `UPDATE credentials 
-       SET assigned = true, assigned_to = $1, assigned_at = $2
-       WHERE username = $3`,
-      [userId, now, cred.username]
-    );
-
-    // Add user record
-    await client.query(
-      "INSERT INTO users (user_id, username, password, email, claimed_at) VALUES ($1, $2, $3, $4, $5)",
-      [userId, cred.username, cred.password, email, now]
-    );
-
-    await client.query("COMMIT");
-
-    const assignment = {
-      user_id: userId,
-      username: cred.username,
-      password: cred.password,
-      email: email,
-      claimed_at: now
-    };
-
-    return { already: false, assignment };
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
+  // First check if user already has an assignment
+  const existingUser = await getUserAssignment(userId);
+  if (existingUser) {
+    return { already: true, assignment: existingUser };
   }
+
+  // Check if email is already used
+  const existingEmail = await getUserByEmail(email);
+  if (existingEmail) {
+    return { emailUsed: true };
+  }
+
+  // Find available credential
+  const availableCred = await dbGet(
+    "SELECT * FROM credentials WHERE assigned = 0 LIMIT 1"
+  );
+
+  if (!availableCred) {
+    return { noneLeft: true };
+  }
+
+  const now = new Date().toISOString();
+
+  // Update credentials table
+  await dbRun(
+    `UPDATE credentials 
+     SET assigned = 1, assigned_to = ?, assigned_at = ?
+     WHERE username = ?`,
+    [userId, now, availableCred.username]
+  );
+
+  // Add user record
+  await dbRun(
+    "INSERT INTO users (user_id, username, password, email, claimed_at) VALUES (?, ?, ?, ?, ?)",
+    [userId, availableCred.username, availableCred.password, email, now]
+  );
+
+  const assignment = {
+    user_id: userId,
+    username: availableCred.username,
+    password: availableCred.password,
+    email: email,
+    claimed_at: now
+  };
+
+  return { already: false, assignment };
 }
 
 function isValidEmail(email) {
@@ -209,7 +175,7 @@ function formatAssignmentMessage(assignment) {
   ].join("\n");
 }
 
-// Handlers (same as before)
+// Handlers
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
@@ -318,7 +284,7 @@ bot.on("message", async (msg) => {
 
 // Initialize database and start the bot
 initDatabase().then(() => {
-  console.log("Database initialized successfully");
+  console.log(`Database initialized at ${DB_PATH}`);
   console.log("Indepay bot is running. Use /start to begin.");
 }).catch(err => {
   console.error("Failed to initialize database:", err);
@@ -338,12 +304,12 @@ app.listen(PORT, () => {
 // Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('Closing database connection...');
-  await pool.end();
+  await db.close();
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   console.log('Closing database connection...');
-  await pool.end();
+  await db.close();
   process.exit(0);
 });
